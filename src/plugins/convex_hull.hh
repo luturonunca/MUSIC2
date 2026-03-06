@@ -69,7 +69,14 @@ struct convex_hull{
         normals_U_.assign( faceidx_U_.size(), 0.0 );
         x0_L_.assign( faceidx_L_.size(), 0.0 );
         x0_U_.assign( faceidx_U_.size(), 0.0 );
-        
+
+        // vertex mean: a guaranteed interior point used to orient all face normals inward
+        real_t vmean[3] = {0.0, 0.0, 0.0};
+        for( size_t q=0; q<npoints_; ++q )
+            for( int p=0; p<3; ++p )
+                vmean[p] += points[3*q+p];
+        vmean[0] /= npoints_; vmean[1] /= npoints_; vmean[2] /= npoints_;
+
         #pragma omp parallel for
         for( int i=0; i<(int)faceidx_L_.size()/3; ++i )
         {
@@ -80,23 +87,24 @@ struct convex_hull{
                 d1[j] = points[ 3*faceidx_L_[3*i+1] + j ] - points[ 3*faceidx_L_[3*i+0] + j ];
                 d2[j] = points[ 3*faceidx_L_[3*i+2] + j ] - points[ 3*faceidx_L_[3*i+0] + j ];
             }
-            
+
             normals_L_[3*i+0] = d1[1]*d2[2] - d1[2]*d2[1];
             normals_L_[3*i+1] = d1[2]*d2[0] - d1[0]*d2[2];
             normals_L_[3*i+2] = d1[0]*d2[1] - d1[1]*d2[0];
-            
-            // negative sign for lower hull
-            double norm_n = -sqrt(normals_L_[3*i+0]*normals_L_[3*i+0]+
-                                  normals_L_[3*i+1]*normals_L_[3*i+1]+
-                                  normals_L_[3*i+2]*normals_L_[3*i+2]);
-            
+
+            // orient toward vertex mean (inward); flip sign if needed
+            double tc0 = vmean[0]-x0_L_[3*i+0], tc1 = vmean[1]-x0_L_[3*i+1], tc2 = vmean[2]-x0_L_[3*i+2];
+            double dot_c = normals_L_[3*i+0]*tc0 + normals_L_[3*i+1]*tc1 + normals_L_[3*i+2]*tc2;
+            double norm_n = sqrt(normals_L_[3*i+0]*normals_L_[3*i+0]+
+                                 normals_L_[3*i+1]*normals_L_[3*i+1]+
+                                 normals_L_[3*i+2]*normals_L_[3*i+2]);
+            if( dot_c < 0.0 ) norm_n = -norm_n;
+
             normals_L_[3*i+0] /= norm_n;
             normals_L_[3*i+1] /= norm_n;
             normals_L_[3*i+2] /= norm_n;
-            
-            
         }
-        
+
         #pragma omp parallel for
         for( int i=0; i<(int)faceidx_U_.size()/3; ++i )
         {
@@ -107,21 +115,79 @@ struct convex_hull{
                 d1[j] = points[ 3*faceidx_U_[3*i+1] + j ] - points[ 3*faceidx_U_[3*i+0] + j ];
                 d2[j] = points[ 3*faceidx_U_[3*i+2] + j ] - points[ 3*faceidx_U_[3*i+0] + j ];
             }
-            
+
             normals_U_[3*i+0] = d1[1]*d2[2] - d1[2]*d2[1];
             normals_U_[3*i+1] = d1[2]*d2[0] - d1[0]*d2[2];
             normals_U_[3*i+2] = d1[0]*d2[1] - d1[1]*d2[0];
-            
+
+            // orient toward vertex mean (inward); flip sign if needed
+            double tc0 = vmean[0]-x0_U_[3*i+0], tc1 = vmean[1]-x0_U_[3*i+1], tc2 = vmean[2]-x0_U_[3*i+2];
+            double dot_c = normals_U_[3*i+0]*tc0 + normals_U_[3*i+1]*tc1 + normals_U_[3*i+2]*tc2;
             double norm_n = sqrt(normals_U_[3*i+0]*normals_U_[3*i+0]+
                                  normals_U_[3*i+1]*normals_U_[3*i+1]+
                                  normals_U_[3*i+2]*normals_U_[3*i+2]);
-            
+            if( dot_c < 0.0 ) norm_n = -norm_n;
+
             normals_U_[3*i+0] /= norm_n;
             normals_U_[3*i+1] /= norm_n;
             normals_U_[3*i+2] /= norm_n;
         }
     }
     
+    // Keep only true convex-hull faces: every input point must satisfy
+    // dot(q - x0, n) >= -eps.  Interior/spurious faces (from gift-wrapping
+    // degeneracies) fail this test for at least one point and are removed.
+    void filter_hull_faces( cpr_ points )
+    {
+        const double eps = 1e-10;
+
+        auto filter = [&]( std::vector<int>& fidx,
+                           std::vector<real_t>& normals,
+                           std::vector<real_t>& x0s )
+        {
+            int nf = (int)fidx.size()/3;
+            std::vector<int>    fidx_new;
+            std::vector<real_t> normals_new, x0_new;
+            fidx_new.reserve(fidx.size());
+            normals_new.reserve(normals.size());
+            x0_new.reserve(x0s.size());
+
+            for( int i=0; i<nf; ++i )
+            {
+                bool valid = true;
+                for( size_t q=0; q<npoints_ && valid; ++q )
+                {
+                    double d = 0.0;
+                    for( int p=0; p<3; ++p )
+                        d += normals[3*i+p] * (points[3*q+p] - x0s[3*i+p]);
+                    if( d < -eps ) valid = false;
+                }
+                if( valid )
+                {
+                    fidx_new.push_back( fidx[3*i+0] );
+                    fidx_new.push_back( fidx[3*i+1] );
+                    fidx_new.push_back( fidx[3*i+2] );
+                    for( int p=0; p<3; ++p ) normals_new.push_back( normals[3*i+p] );
+                    for( int p=0; p<3; ++p ) x0_new.push_back( x0s[3*i+p] );
+                }
+            }
+
+            fidx    = std::move(fidx_new);
+            normals = std::move(normals_new);
+            x0s     = std::move(x0_new);
+        };
+
+        size_t nfL_before = faceidx_L_.size()/3;
+        size_t nfU_before = faceidx_U_.size()/3;
+
+        filter( faceidx_L_, normals_L_, x0_L_ );
+        filter( faceidx_U_, normals_U_, x0_U_ );
+
+        music::ilog.Print("filter_hull_faces: L %zu->%zu  U %zu->%zu",
+            nfL_before, faceidx_L_.size()/3,
+            nfU_before, faceidx_U_.size()/3 );
+    }
+
     void compute_center( cpr_ points )
     {
         real_t xc[3] = {0.0,0.0,0.0};
@@ -326,8 +392,18 @@ struct convex_hull{
 #endif
         
         compute_face_normals( points );
+        filter_hull_faces( points );
         compute_center( points );
-        
+
+        // --- DIAGNOSTIC: verify centroid is inside its own hull ---
+        {
+            bool centroid_ok = check_point( &centroid_[0] );
+            music::ilog.Print("convex_hull diagnostic: centroid check = %s  (nfL=%zu nfU=%zu vol=%.6e)",
+                centroid_ok ? "PASS" : "FAIL",
+                faceidx_L_.size()/3, faceidx_U_.size()/3, (double)volume_ );
+        }
+        // --- END DIAGNOSTIC ---
+
         // finally compute AABB
         left_[0] = left_[1] = left_[2] = 1e30;
         right_[0] = right_[1] = right_[2] = -1e30;
